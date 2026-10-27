@@ -1,0 +1,36 @@
+{
+  "name": "qq-group-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A QQ official group chatbot on Cloudflare Workers: LLM with provider failover, image understanding, smart web search, and proactive chime-in.",
+  "license": "MIT",
+  "keywords": [
+    "qq-bot",
+    "cloudflare-workers",
+    "llm",
+    "deepseek",
+    "glm",
+    "chatbot"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "smoke": "node scripts/smoke.mjs",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run test"
+  },
+  "dependencies": {
+    "tweetnacl": "^1.0.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.0.0",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0",
+    "wrangler": "^4.0.0"
+  }
+}

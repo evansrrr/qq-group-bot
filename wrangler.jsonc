@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "qq-group-bot",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-01-01",
+
+  // 运行时变量：主动插话概率，0 表示只在被叫到时说话
+  "vars": {
+    "CHIME_RATE": "0.3"
+  },
+
+  // 先用 *.workers.dev 子域名跑通；要绑自定义域名时打开下面的 routes
+  "workers_dev": true,
+  // "routes": [{ "pattern": "bot.example.com", "custom_domain": true }],
+
+  // 允许用 import 直接把 .txt 人格提示词打进 worker
+  "rules": [{ "type": "Text", "globs": ["**/*.txt"], "fallthrough": true }],
+
+  "observability": {
+    "enabled": true
+  }
+}

@@ -1,0 +1,24 @@
+# ===== 必填:QQ 开放平台 (q.qq.com) 创建机器人后获得 =====
+QQ_APP_ID=10000000
+QQ_BOT_SECRET=your_bot_secret
+
+# ===== 至少配一个 LLM key（DeepSeek 首选，GLM 兜底）=====
+DEEPSEEK_API_KEY=your_deepseek_api_key
+GLM_API_KEY=your_glm_api_key
+
+# ===== 可选 =====
+# DeepSeek 模型名（默认 deepseek-flash）
+# DEEPSEEK_MODEL=deepseek-flash
+# 智谱模型链（逗号分隔，按顺序故障转移）；不配置则用代码默认：
+# glm-4.7-flash → GLM-4-Flash-250414 → GLM-Z1-Flash
+# GLM_MODELS=glm-4.7-flash,GLM-4-Flash-250414,GLM-Z1-Flash
+# 人格提示词覆盖（默认用 src/prompt/persona.txt）
+# BOT_PROMPT=你是一个 QQ 群聊机器人，说话简短口语化。
+# 机器人昵称（逗号分隔）：群里提到就必接话；默认 小鲸,鲸鱼,机器人
+# BOT_ALIASES=小鲸,鲸鱼,机器人
+# 主动插话概率（0-1，默认 0.3；设为 0 则只在被叫到时说话）
+# CHIME_RATE=0.3
+# 以下仅本地联调/测试需要，生产保持注释
+# GLM_BASE_URL=https://open.bigmodel.cn
+# DEEPSEEK_BASE_URL=https://api.deepseek.com
+# QQ_API_BASE=https://api.bot.qq.com
