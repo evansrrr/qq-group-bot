@@ -9,6 +9,16 @@
     "CHIME_RATE": "0.3"
   },
 
+  // 群聊长期记忆。database_id 用 `npx wrangler d1 list` 的输出替换；本地开发不校验真实 id
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "qq-group-bot",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+
   // 先用 *.workers.dev 子域名跑通；要绑自定义域名时打开下面的 routes
   "workers_dev": true,
   // "routes": [{ "pattern": "bot.example.com", "custom_domain": true }],

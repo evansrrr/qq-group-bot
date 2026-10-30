@@ -14,6 +14,9 @@ import nacl from "tweetnacl";
 const WORKER_PORT = 8787;
 const MOCK_PORT = 9099;
 const SECRET = "test_bot_secret_0123456789"; // 必须与下方 SMOKE_VARS 的 QQ_BOT_SECRET 一致
+// 每次运行使用全新群号：本地 D1 会持久化，复用固定群号会让上一轮的历史污染断言
+const RUN_ID = Date.now().toString(36);
+const G = (n) => `GRP${n}-${RUN_ID}`;
 // 用于兜底清理残留进程时匹配本项目路径，跨机器/改目录名都能命中
 const PROJECT_DIR = basename(fileURLToPath(new URL("..", import.meta.url)));
 
@@ -118,7 +121,9 @@ function startMock() {
                 ? last.filter((p) => p.type === "text").map((p) => p.text).join(" ")
                 : "";
           let content = "mock回复~";
-          if (sys0.includes("搜索意图判断器")) {
+          if (sys0.includes("长期记忆摘要")) {
+            content = "群友甲爱摸鱼,常在群里晒日常;群友乙偶尔问在吗;群里常聊天气和旅游。";
+          } else if (sys0.includes("搜索意图判断器")) {
             content = lastText.includes("天气") ? "Y:北京今日天气" : "N";
           } else if (lastText.includes("拆分测试")) {
             content = "第一条短句\n---\n第二条短句";
@@ -247,7 +252,7 @@ async function main() {
       d: {
         id: "MSG1",
         content: "你好呀",
-        group_openid: "GRP1",
+        group_openid: G(1),
         author: { username: "测试用户" },
       },
     });
@@ -280,7 +285,7 @@ async function main() {
     assert(llm1?.messages?.[0]?.role === "system", "首条为 system 提示词");
     assert(llm1?.model === "deepseek-flash", "首选 model=deepseek-flash");
     const send1 = received.sends[0];
-    assert(send1?.path === "/v2/groups/GRP1/messages", "发到正确的群接口");
+    assert(send1?.path === `/v2/groups/${G(1)}/messages`, "发到正确的群接口");
     assert(send1?.body?.msg_id === "MSG1" && send1?.body?.msg_seq === 1, "被动回复 msg_id/msg_seq");
     assert(send1?.body?.content === "mock回复~", "回复内容来自 LLM");
     assert(received.tokens >= 1, "获取过 access_token");
@@ -298,7 +303,7 @@ async function main() {
       id: "evt2",
       op: 0,
       t: "GROUP_AT_MESSAGE_CREATE",
-      d: { id: "MSG2", content: "/reset", group_openid: "GRP1", author: { username: "测试用户" } },
+      d: { id: "MSG2", content: "/reset", group_openid: G(1), author: { username: "测试用户" } },
     });
     await postWebhook(resetEvent, {
       signature: signHex(ts + resetEvent, SECRET),
@@ -314,7 +319,7 @@ async function main() {
       id: "evt3",
       op: 0,
       t: "GROUP_AT_MESSAGE_CREATE",
-      d: { id: "MSG3", content: "继续聊", group_openid: "GRP1", author: { username: "测试用户" } },
+      d: { id: "MSG3", content: "继续聊", group_openid: G(1), author: { username: "测试用户" } },
     });
     await postWebhook(afterReset, {
       signature: signHex(ts + afterReset, SECRET),
@@ -348,7 +353,7 @@ async function main() {
       d: {
         id: "MSG8",
         content: "今天摸鱼好开心",
-        group_openid: "GRP1",
+        group_openid: G(1),
         author: { username: "群友甲", bot: false },
       },
     });
@@ -379,7 +384,7 @@ async function main() {
       d: {
         id: "MSG9",
         content: "我是别的机器人",
-        group_openid: "GRP1",
+        group_openid: G(1),
         author: { username: "机器人乙", bot: true },
       },
     });
@@ -399,7 +404,7 @@ async function main() {
       d: {
         id: "MSG10",
         content: "<@BOTOPENID123> 在吗",
-        group_openid: "GRP2",
+        group_openid: G(2),
         author: { username: "群友乙", bot: false },
         mentions: [{ id: "BOTOPENID123", username: "小鲸", bot: true }],
       },
@@ -418,7 +423,7 @@ async function main() {
       d: {
         id: "MSG10",
         content: "在吗",
-        group_openid: "GRP2",
+        group_openid: G(2),
         author: { username: "群友乙", bot: false },
       },
     });
@@ -435,7 +440,7 @@ async function main() {
       d: {
         id: "MSG11",
         content: "北京今天天气怎么样",
-        group_openid: "GRP3",
+        group_openid: G(3),
         author: { username: "群友丙", bot: false },
       },
     });
@@ -467,7 +472,7 @@ async function main() {
       d: {
         id: "MSG12",
         content: "拆分测试一下",
-        group_openid: "GRP4",
+        group_openid: G(4),
         author: { username: "群友丁", bot: false },
       },
     });
@@ -493,7 +498,7 @@ async function main() {
         id: "MSG13",
         content: "哈哈哈哈笑死",
         message_type: 103,
-        group_openid: "GRP5",
+        group_openid: G(5),
         author: { username: "群友戊", bot: false },
         msg_elements: [{ message_type: 103, content: "今天上班好累", author: { username: "群友己" } }],
       },
@@ -512,6 +517,95 @@ async function main() {
       ),
       "被引用内容已注入请求",
     );
+    console.log("\n[13] 持久记忆:跨请求检索 /recall");
+    const sendsBefore13 = received.sends.length;
+    const recallEvent = JSON.stringify({
+      id: "evt11",
+      op: 0,
+      t: "GROUP_AT_MESSAGE_CREATE",
+      d: {
+        id: "MSG14",
+        content: "/recall 摸鱼",
+        group_openid: G(1),
+        author: { username: "群友庚", bot: false },
+      },
+    });
+    await postWebhook(recallEvent, { signature: signHex(ts + recallEvent, SECRET), timestamp: ts });
+    assert(
+      await waitFor(() => received.sends.length >= sendsBefore13 + 1, 15000, "/recall 回复"),
+      "/recall 有回复",
+    );
+    const recallReply = String(received.sends[sendsBefore13]?.body?.content ?? "");
+    assert(recallReply.includes("摸鱼"), "检索到此前请求里存下的消息(D1 持久化生效)");
+    assert(recallReply.includes("群友甲"), "检索结果带说话人");
+
+    console.log("\n[14] 长期摘要 /summary 与摘要注入");
+    const sendsBefore14 = received.sends.length;
+    const summaryEvent = JSON.stringify({
+      id: "evt12",
+      op: 0,
+      t: "GROUP_AT_MESSAGE_CREATE",
+      d: { id: "MSG15", content: "/summary", group_openid: G(1), author: { username: "群友庚" } },
+    });
+    await postWebhook(summaryEvent, { signature: signHex(ts + summaryEvent, SECRET), timestamp: ts });
+    assert(
+      await waitFor(() => received.sends.length >= sendsBefore14 + 1, 20000, "/summary 回复"),
+      "/summary 有回复",
+    );
+    assert(
+      String(received.sends[sendsBefore14]?.body?.content ?? "").includes("群友甲"),
+      "摘要来自 LLM 并落库",
+    );
+
+    const sendsBefore14b = received.sends.length;
+    const afterSummaryEvent = JSON.stringify({
+      id: "evt13",
+      op: 0,
+      t: "GROUP_AT_MESSAGE_CREATE",
+      d: {
+        id: "MSG16",
+        content: "你们最近都聊啥了",
+        group_openid: G(1),
+        author: { username: "群友庚" },
+      },
+    });
+    await postWebhook(afterSummaryEvent, {
+      signature: signHex(ts + afterSummaryEvent, SECRET),
+      timestamp: ts,
+    });
+    assert(
+      await waitFor(() => received.sends.length >= sendsBefore14b + 1, 20000, "摘要后回复"),
+      "摘要后仍能正常回复",
+    );
+    const summaryInjected = answers()[answers().length - 1]?.body;
+    assert(
+      summaryInjected?.messages?.some(
+        (m) => typeof m.content === "string" && m.content.includes("群聊长期记忆摘要"),
+      ),
+      "长期摘要已注入上下文",
+    );
+
+    console.log("\n[15] 成员画像 /profile");
+    const sendsBefore15 = received.sends.length;
+    const profileEvent = JSON.stringify({
+      id: "evt14",
+      op: 0,
+      t: "GROUP_AT_MESSAGE_CREATE",
+      d: {
+        id: "MSG17",
+        content: "/profile 群友甲",
+        group_openid: G(1),
+        author: { username: "群友庚" },
+      },
+    });
+    await postWebhook(profileEvent, { signature: signHex(ts + profileEvent, SECRET), timestamp: ts });
+    assert(
+      await waitFor(() => received.sends.length >= sendsBefore15 + 1, 15000, "/profile 回复"),
+      "/profile 有回复",
+    );
+    const profileReply = String(received.sends[sendsBefore15]?.body?.content ?? "");
+    assert(/说过 \d+ 句/.test(profileReply), "画像带消息条数统计");
+    assert(profileReply.includes("群友甲"), "画像命中该成员");
   } finally {
     restoreVars(); // 先恢复真实 .dev.vars,再做有风险的进程清理
     await cleanup();

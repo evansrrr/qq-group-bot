@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_ALIASES, resolveAliases, shouldChimeIn } from "../src/state";
 import type { Env } from "../src/env";
 
-const env: Env = { QQ_APP_ID: "x", QQ_BOT_SECRET: "x", CHIME_RATE: "0" };
+const env: Env = {
+  DB: {} as D1Database,
+  QQ_APP_ID: "x",
+  QQ_BOT_SECRET: "x",
+  CHIME_RATE: "0",
+};
 
 afterEach(() => {
   vi.restoreAllMocks();

@@ -22,7 +22,10 @@
     "test": "vitest run",
     "smoke": "node scripts/smoke.mjs",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm run test"
+    "check": "npm run typecheck && npm run test",
+    "db:create": "wrangler d1 create qq-group-bot",
+    "db:migrate": "wrangler d1 migrations apply qq-group-bot --remote",
+    "db:migrate:local": "wrangler d1 migrations apply qq-group-bot --local"
   },
   "dependencies": {
     "tweetnacl": "^1.0.3"

@@ -1,4 +1,7 @@
 export interface Env {
+  /** D1 数据库绑定:群聊长期记忆 */
+  DB: D1Database;
+
   /** QQ 开放平台 AppID */
   QQ_APP_ID: string;
   /** QQ 开放平台 BotSecret,同时用于 Ed25519 验签 */

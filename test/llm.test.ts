@@ -3,6 +3,7 @@ import { buildModelChain, chatCompletion, resolveModelChain } from "../src/llm";
 import type { Env } from "../src/env";
 
 const env: Env = {
+  DB: {} as D1Database,
   QQ_APP_ID: "x",
   QQ_BOT_SECRET: "x",
   GLM_API_KEY: "test-key",
@@ -109,7 +110,7 @@ describe("chatCompletion 故障转移", () => {
 
   it("没有任何 key 时直接抛错", async () => {
     await expect(
-      chatCompletion({ QQ_APP_ID: "x", QQ_BOT_SECRET: "x" }, messages),
+      chatCompletion({ DB: {} as D1Database, QQ_APP_ID: "x", QQ_BOT_SECRET: "x" }, messages),
     ).rejects.toThrow("no api key configured");
   });
 

@@ -15,7 +15,8 @@ No server required — one Worker is enough. The LLM layer supports **multi-prov
 - **Quoted messages** — quoted content (`message_type=103`) is injected as context
 - **Multi-part replies** — the model may split a reply into 2–3 messages with a `---` separator
 - **Proactive chime-in** — optional probabilistic replies; always replies when its alias is mentioned
-- **Per-group memory** — 20 messages, 30-minute TTL; `/reset` clears it
+- **Persistent memory (D1)** — every group message is stored in Cloudflare D1, per-group isolated
+- **Recall & summarize** — `/recall keyword` searches the archive, `/summary` compacts it into a 400-word long-term memory, `/profile name` shows member stats
 - **Signature verification** — Ed25519 webhook signing and automatic `op=13` callback validation
 
 ## Quick start
@@ -26,6 +27,13 @@ cd qq-group-bot
 npm install
 cp .dev.vars.example .dev.vars   # fill in your keys
 npm run dev                      # http://127.0.0.1:8787
+```
+
+## Setup the database
+
+```bash
+npm run db:create        # copy the printed database_id into wrangler.jsonc
+npm run db:migrate:local # local tables (the Worker also creates them lazily)
 ```
 
 ## Configuration
@@ -55,6 +63,19 @@ npm run deploy
 Then in the QQ Open Platform console, choose **Webhook** delivery, set the callback to
 `https://<your-host>/qq/webhook`, and subscribe to `GROUP_AT_MESSAGE_CREATE`
 (plus `GROUP_MESSAGE_CREATE` if you want proactive chime-in).
+
+## How memory works
+
+| Table | Purpose |
+| --- | --- |
+| `messages` | Raw turns, capped at 500 per group |
+| `summaries` | Rolling 400-word group memory, refreshed every 40 new messages |
+| `members` | Per-member counters (turns, chars, first/last seen, last line) |
+| `seen` | Event de-duplication, 10-minute TTL |
+
+Retrieval is keyword-based (`LIKE` pushed down to SQL, scored in memory), 5 hits max per turn. Compaction runs in `ctx.waitUntil` so it never blocks a reply.
+
+See [docs/ROADMAP.md](./docs/ROADMAP.md) for further directions (member personas, group style profiles, slang dictionary, weekly reports, semantic retrieval).
 
 ## Test
 
