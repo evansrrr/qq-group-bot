@@ -2,7 +2,7 @@
  * 端到端冒烟测试:
  * 1. 起本地 mock(QQ OpenAPI + 智谱 chat/completions)
  * 2. 起真实 wrangler dev(worker 通过 GLM_BASE_URL/QQ_API_BASE 指到 mock)
- * 3. 校验:健康检查 / op=13 回调验证 / 验签 / 401 / 事件处理 / 去重 / /reset
+ * 3. 校验:健康检查 / op=13 回调验证 / 验签 / 401 / 事件处理 / 去重 / 自然语言清空
  */
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -31,10 +31,21 @@ const SMOKE_VARS = [
   "GLM_BASE_URL=http://127.0.0.1:9099",
   "QQ_API_BASE=http://127.0.0.1:9099",
   "CHIME_RATE=1",
+  "ADMIN_OPENIDS=ADMIN1",
+  "PORTRAIT_EVERY=2",
+  "PORTRAIT_MAX=6",
+  "PORTRAIT_MIN_SAMPLES=2",
+  "STYLE_EVERY=4",
+  "STYLE_MIN_SAMPLES=2",
+  "IDLE_AFTER_MIN=0",
+  "IDLE_MAX_WAIT_MIN=0",
+  "IDLE_MIN_MSGS=1",
+  "EMBEDDING_BASE_URL=http://127.0.0.1:9099",
+  "EMBEDDING_MODEL=test-embed",
   "",
 ].join("\n");
 
-const received = { llm: [], sends: [], tokens: 0, searches: [] };
+const received = { llm: [], sends: [], tokens: 0, searches: [], embeddings: [] };
 let failures = 0;
 
 function assert(cond, name) {
@@ -59,8 +70,13 @@ async function waitFor(fn, timeoutMs = 15000, label = "condition") {
   return false;
 }
 
-const isDecision = (c) => (c.body.messages?.[0]?.content ?? "").includes("搜索意图判断器");
-const answers = () => received.llm.filter((c) => !isDecision(c));
+const systemOf = (c) => c.body.messages?.[0]?.content ?? "";
+const isDecision = (c) => systemOf(c).includes("搜索意图判断器");
+const isSummary = (c) => systemOf(c).includes("长期记忆摘要");
+const isPortrait = (c) => systemOf(c).includes("整理某个群成员的画像");
+const isStyle = (c) => systemOf(c).includes("总结一个 QQ 群的说话风格");
+const isAux = (c) => isSummary(c) || isPortrait(c) || isStyle(c);
+const answers = () => received.llm.filter((c) => !isDecision(c) && !isAux(c));
 const decisions = () => received.llm.filter(isDecision);
 
 /**
@@ -96,6 +112,10 @@ function startMock() {
         } else if (req.url?.startsWith("/v2/groups/") && req.url.endsWith("/messages")) {
           received.sends.push({ path: req.url, body: parsed, auth: req.headers.authorization });
           res.end(JSON.stringify({ id: "sent_1", timestamp: "2026-01-01T00:00:00+08:00" }));
+        } else if (req.url === "/embeddings") {
+          received.embeddings.push(parsed);
+          // 固定向量:让任意查询与任意历史都足够相似,便于验证语义召回通路
+          res.end(JSON.stringify({ data: [{ embedding: [1, 0.5, 0.25, 0, 0, 0, 0, 0] }] }));
         } else if (req.url === "/v1/tools/search") {
           received.searches.push(parsed);
           res.end(
@@ -121,7 +141,11 @@ function startMock() {
                 ? last.filter((p) => p.type === "text").map((p) => p.text).join(" ")
                 : "";
           let content = "mock回复~";
-          if (sys0.includes("长期记忆摘要")) {
+          if (sys0.includes("整理某个群成员的画像")) {
+            content = "句子短、爱晒日常、爱用省略号|摸鱼,游戏|话少";
+          } else if (sys0.includes("总结一个 QQ 群的说话风格")) {
+            content = "清一色短句,爱用省略号,称呼人用佬,不发表情。";
+          } else if (sys0.includes("长期记忆摘要")) {
             content = "群友甲爱摸鱼,常在群里晒日常;群友乙偶尔问在吗;群里常聊天气和旅游。";
           } else if (sys0.includes("搜索意图判断器")) {
             content = lastText.includes("天气") ? "Y:北京今日天气" : "N";
@@ -182,11 +206,15 @@ async function main() {
   process.on("exit", restoreVars);
 
   console.log("[smoke] starting wrangler dev...");
-  const wrangler = spawn("npx", ["wrangler", "dev", "--port", String(WORKER_PORT)], {
-    shell: true,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, WRANGLER_SEND_METRICS: "false" },
-  });
+  const wrangler = spawn(
+    "npx",
+    ["wrangler", "dev", "--port", String(WORKER_PORT), "--test-scheduled"],
+    {
+      shell: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, WRANGLER_SEND_METRICS: "false" },
+    },
+  );
   let wranglerLog = "";
   wrangler.stdout.on("data", (d) => (wranglerLog += d));
   wrangler.stderr.on("data", (d) => (wranglerLog += d));
@@ -298,22 +326,51 @@ async function main() {
     await sleep(3000);
     assert(received.sends.length === 1, "重复事件不重复回复");
 
-    console.log("\n[7] /reset 清空记忆");
-    const resetEvent = JSON.stringify({
+    console.log("\n[7] 自然语言清空记忆(需管理员)");
+    const nonAdminReset = JSON.stringify({
       id: "evt2",
       op: 0,
       t: "GROUP_AT_MESSAGE_CREATE",
-      d: { id: "MSG2", content: "/reset", group_openid: G(1), author: { username: "测试用户" } },
+      d: {
+        id: "MSG2",
+        content: "清空这个群的记忆",
+        group_openid: G(1),
+        author: { username: "测试用户", member_openid: "USER1" },
+      },
     });
-    await postWebhook(resetEvent, {
-      signature: signHex(ts + resetEvent, SECRET),
+    await postWebhook(nonAdminReset, {
+      signature: signHex(ts + nonAdminReset, SECRET),
       timestamp: ts,
     });
     assert(
-      await waitFor(() => received.sends.length >= 2, 10000, "/reset 回复"),
-      "/reset 有回复",
+      await waitFor(() => received.sends.length >= 2, 10000, "非管理员拒绝回复"),
+      "非管理员触发有回复",
     );
-    assert(received.sends[1]?.body?.msg_id === "MSG2", "回复 MSG2");
+    assert(
+      String(received.sends[1]?.body?.content ?? "").includes("管理员"),
+      "非管理员被拒绝(不清空)",
+    );
+
+    const adminReset = JSON.stringify({
+      id: "evt2b",
+      op: 0,
+      t: "GROUP_AT_MESSAGE_CREATE",
+      d: {
+        id: "MSG2B",
+        content: "清空这个群的记忆",
+        group_openid: G(1),
+        author: { username: "群主", member_openid: "ADMIN1" },
+      },
+    });
+    await postWebhook(adminReset, {
+      signature: signHex(ts + adminReset, SECRET),
+      timestamp: ts,
+    });
+    assert(
+      await waitFor(() => received.sends.length >= 3, 10000, "管理员清空回复"),
+      "管理员触发有回复",
+    );
+    assert(String(received.sends[2]?.body?.content ?? "").includes("清空"), "记忆已清空");
 
     const afterReset = JSON.stringify({
       id: "evt3",
@@ -517,7 +574,7 @@ async function main() {
       ),
       "被引用内容已注入请求",
     );
-    console.log("\n[13] 持久记忆:跨请求检索 /recall");
+    console.log("\n[13] 自然语言检索历史(跨请求)");
     const sendsBefore13 = received.sends.length;
     const recallEvent = JSON.stringify({
       id: "evt11",
@@ -525,32 +582,37 @@ async function main() {
       t: "GROUP_AT_MESSAGE_CREATE",
       d: {
         id: "MSG14",
-        content: "/recall 摸鱼",
+        content: "查一下之前的记录 摸鱼",
         group_openid: G(1),
-        author: { username: "群友庚", bot: false },
+        author: { username: "群友庚", member_openid: "USER9", bot: false },
       },
     });
     await postWebhook(recallEvent, { signature: signHex(ts + recallEvent, SECRET), timestamp: ts });
     assert(
-      await waitFor(() => received.sends.length >= sendsBefore13 + 1, 15000, "/recall 回复"),
-      "/recall 有回复",
+      await waitFor(() => received.sends.length >= sendsBefore13 + 1, 15000, "检索回复"),
+      "检索有回复",
     );
     const recallReply = String(received.sends[sendsBefore13]?.body?.content ?? "");
     assert(recallReply.includes("摸鱼"), "检索到此前请求里存下的消息(D1 持久化生效)");
     assert(recallReply.includes("群友甲"), "检索结果带说话人");
 
-    console.log("\n[14] 长期摘要 /summary 与摘要注入");
+    console.log("\n[14] 自然语言总结 + 摘要注入");
     const sendsBefore14 = received.sends.length;
     const summaryEvent = JSON.stringify({
       id: "evt12",
       op: 0,
       t: "GROUP_AT_MESSAGE_CREATE",
-      d: { id: "MSG15", content: "/summary", group_openid: G(1), author: { username: "群友庚" } },
+      d: {
+        id: "MSG15",
+        content: "总结一下群里最近聊的",
+        group_openid: G(1),
+        author: { username: "群友庚", member_openid: "USER9" },
+      },
     });
     await postWebhook(summaryEvent, { signature: signHex(ts + summaryEvent, SECRET), timestamp: ts });
     assert(
-      await waitFor(() => received.sends.length >= sendsBefore14 + 1, 20000, "/summary 回复"),
-      "/summary 有回复",
+      await waitFor(() => received.sends.length >= sendsBefore14 + 1, 20000, "总结回复"),
+      "总结有回复",
     );
     assert(
       String(received.sends[sendsBefore14]?.body?.content ?? "").includes("群友甲"),
@@ -566,7 +628,7 @@ async function main() {
         id: "MSG16",
         content: "你们最近都聊啥了",
         group_openid: G(1),
-        author: { username: "群友庚" },
+        author: { username: "群友庚", member_openid: "USER9" },
       },
     });
     await postWebhook(afterSummaryEvent, {
@@ -585,27 +647,131 @@ async function main() {
       "长期摘要已注入上下文",
     );
 
-    console.log("\n[15] 成员画像 /profile");
+    console.log("\n[15] 成员画像:发言满额自动生成 + 自然语言查询");
+    const portraitTrigger = JSON.stringify({
+      id: "evt15",
+      op: 0,
+      t: "GROUP_AT_MESSAGE_CREATE",
+      d: {
+        id: "MSG18",
+        content: "今天又摸了一天鱼",
+        group_openid: G(1),
+        author: { username: "群友甲", member_openid: "USER8", bot: false },
+      },
+    });
+    await postWebhook(portraitTrigger, {
+      signature: signHex(ts + portraitTrigger, SECRET),
+      timestamp: ts,
+    });
+    assert(
+      await waitFor(
+        () => received.llm.some((c) => isPortrait(c) && JSON.stringify(c.body).includes("群友甲")),
+        20000,
+        "画像任务",
+      ),
+      "发言满额触发画像生成",
+    );
+
     const sendsBefore15 = received.sends.length;
     const profileEvent = JSON.stringify({
-      id: "evt14",
+      id: "evt16",
       op: 0,
       t: "GROUP_AT_MESSAGE_CREATE",
       d: {
         id: "MSG17",
-        content: "/profile 群友甲",
+        content: "群友甲是什么样的人",
         group_openid: G(1),
-        author: { username: "群友庚" },
+        author: { username: "群友庚", member_openid: "USER9" },
       },
     });
     await postWebhook(profileEvent, { signature: signHex(ts + profileEvent, SECRET), timestamp: ts });
     assert(
-      await waitFor(() => received.sends.length >= sendsBefore15 + 1, 15000, "/profile 回复"),
-      "/profile 有回复",
+      await waitFor(() => received.sends.length >= sendsBefore15 + 1, 15000, "画像回复"),
+      "画像查询有回复",
     );
     const profileReply = String(received.sends[sendsBefore15]?.body?.content ?? "");
-    assert(/说过 \d+ 句/.test(profileReply), "画像带消息条数统计");
-    assert(profileReply.includes("群友甲"), "画像命中该成员");
+    assert(profileReply.includes("句子短"), "画像内容来自 LLM 并落库");
+    assert(/说过 \d+ 句/.test(profileReply), "画像附带发言统计");
+
+    console.log("\n[16] 群风格写进聊天上下文");
+    assert(
+      await waitFor(() => received.llm.some(isStyle), 20000, "群风格任务"),
+      "消息满额触发生成群风格",
+    );
+    const sendsBefore16 = received.sends.length;
+    const styleProbe = JSON.stringify({
+      id: "evt17",
+      op: 0,
+      t: "GROUP_AT_MESSAGE_CREATE",
+      d: {
+        id: "MSG19",
+        content: "在吗",
+        group_openid: G(1),
+        author: { username: "群友庚", member_openid: "USER9" },
+      },
+    });
+    await postWebhook(styleProbe, { signature: signHex(ts + styleProbe, SECRET), timestamp: ts });
+    assert(
+      await waitFor(() => received.sends.length >= sendsBefore16 + 1, 20000, "风格后回复"),
+      "生成风格后仍能正常回复",
+    );
+    const styleInjected = answers()[answers().length - 1]?.body;
+    assert(
+      styleInjected?.messages?.some(
+        (m) => typeof m.content === "string" && m.content.includes("本群说话风格"),
+      ),
+      "群风格已注入上下文",
+    );
+
+    console.log("\n[17] 冷场主动发言(cron)");
+    const sendsBefore17 = received.sends.length;
+    const tickRes = await fetch(
+      `http://127.0.0.1:${WORKER_PORT}/__scheduled?cron=${encodeURIComponent("* * * * *")}`,
+    );
+    assert(tickRes.ok, "/__scheduled 可触发(--test-scheduled 生效)");
+    assert(
+      await waitFor(
+        () => received.sends.slice(sendsBefore17).some((s) => s.body?.msg_id === undefined),
+        30000,
+        "主动发言",
+      ),
+      "静默到点后主动发消息(不带 msg_id)",
+    );
+    await sleep(3000); // 等本轮 tick 把 IDLE_BATCH 个群都处理完
+
+    console.log("\n[18] 管理员要求重做画像");
+    const sendsBefore18 = received.sends.length;
+    const reprofileEvent = JSON.stringify({
+      id: "evt18",
+      op: 0,
+      t: "GROUP_AT_MESSAGE_CREATE",
+      d: {
+        id: "MSG20",
+        content: "重新给群友甲做个画像",
+        group_openid: G(1),
+        author: { username: "群主", member_openid: "ADMIN1" },
+      },
+    });
+    await postWebhook(reprofileEvent, {
+      signature: signHex(ts + reprofileEvent, SECRET),
+      timestamp: ts,
+    });
+    assert(
+      await waitFor(
+        () => received.sends.some((s) => s.body?.msg_id === "MSG20"),
+        20000,
+        "重做画像回复",
+      ),
+      "重做画像有回复",
+    );
+    const reprofileReply = String(
+      received.sends.find((s) => s.body?.msg_id === "MSG20")?.body?.content ?? "",
+    );
+    assert(
+      reprofileReply.includes("重新看了一遍"),
+      `重做画像直接返回新结果(实际:${reprofileReply.slice(0, 60)})`,
+    );
+    assert(received.sends.length >= sendsBefore18 + 1, "重做画像写入发送队列");
   } finally {
     restoreVars(); // 先恢复真实 .dev.vars,再做有风险的进程清理
     await cleanup();

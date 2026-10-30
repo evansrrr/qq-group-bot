@@ -29,6 +29,40 @@ export interface Env {
   BOT_ALIASES?: string;
   /** 随机插话概率(0-1),默认 "0.3" */
   CHIME_RATE?: string;
+
+  /** 逗号分隔的管理员 member_openid:允许清空记忆、重做画像等高权限动作 */
+  ADMIN_OPENIDS?: string;
+
+  /** 成员每 N 条发言做一次画像,默认 20 */
+  PORTRAIT_EVERY?: string;
+  /** 成员累计发言达到该条数后停止自动画像,默认 100 */
+  PORTRAIT_MAX?: string;
+  /** 群消息每 N 条更新一次群风格,默认 150 */
+  STYLE_EVERY?: string;
+  /** 生成成员画像所需最少发言条数,默认 5 */
+  PORTRAIT_MIN_SAMPLES?: string;
+  /** 生成群风格所需最少样本条数,默认 10 */
+  STYLE_MIN_SAMPLES?: string;
+
+  /** 静默多少分钟后可安排主动发言,默认 30 */
+  IDLE_AFTER_MIN?: string;
+  /** 静默后随机等待上限(分钟),默认 300 */
+  IDLE_MAX_WAIT_MIN?: string;
+  /** 群消息总量低于该值不主动发言,默认 10 */
+  IDLE_MIN_MSGS?: string;
+  /** 单次 cron 最多处理几个群,默认 3 */
+  IDLE_BATCH?: string;
+
+  /** 语义检索用的 embedding key,不配则回落到 GLM_API_KEY */
+  EMBEDDING_API_KEY?: string;
+  /** 默认 https://open.bigmodel.cn/api/paas/v4 */
+  EMBEDDING_BASE_URL?: string;
+  /** 默认 embedding-3 */
+  EMBEDDING_MODEL?: string;
+  /** 关键词命中少于此值时补向量检索,默认 2 */
+  SEMANTIC_MIN_HITS?: string;
+  /** 语义检索返回条数,默认 3 */
+  SEMANTIC_TOP_K?: string;
 }
 
 export type TextPart = { type: "text"; text: string };

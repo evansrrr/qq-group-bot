@@ -19,6 +19,11 @@
     }
   ],
 
+  // 冷场主动发言:每分钟检查一次有没有到点的群
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+
   // 先用 *.workers.dev 子域名跑通；要绑自定义域名时打开下面的 routes
   "workers_dev": true,
   // "routes": [{ "pattern": "bot.example.com", "custom_domain": true }],

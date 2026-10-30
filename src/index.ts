@@ -1,10 +1,12 @@
 import { signCallbackValidation, verifyCallbackSignature } from "./crypto";
+import { HELP_TEXT, isAdmin, parseIntent } from "./intent";
 import { buildSystemPrompt, chatCompletion } from "./llm";
 import type { ChatMessage, ContentPart, Env } from "./env";
 import { sendGroupMessage } from "./qq";
 import { needsSearch, webSearch } from "./search";
 import { resolveAliases, shouldChimeIn } from "./state";
 import { collectImageParts } from "./vision";
+import { memoryConfig, type MemoryConfig } from "./memory/config";
 import {
   RECALL_LIMIT,
   RECENT_LIMIT,
@@ -15,17 +17,25 @@ import {
   formatRecallReply,
   formatSummaryBlock,
   shouldCompact,
+  type MemoryHit,
 } from "./memory/query";
+import { runIdleTick } from "./memory/idle";
+import { ensureMemberProfile, generateGroupStyle, generateMemberPortrait } from "./memory/profile";
 import { compactGroupMemory } from "./memory/summary";
 import {
   appendMessage,
+  getGroupStyle,
+  getMemberProfile,
   markSeen,
   memberStats,
   readSummary,
   recallMessages,
   recentMessages,
   resetGroup,
+  saveEmbedding,
+  type AppendResult,
 } from "./memory/store";
+import { embedText, mergeHits, semanticRecall, toBase64Int8 } from "./memory/vector";
 
 interface WebhookPayload {
   id?: string;
@@ -139,19 +149,42 @@ export function extractQuotedText(event: GroupMessageEvent): string {
   return joined;
 }
 
-/** 记忆管理指令:命中即处理并返回 true,指令本身不入库 */
-async function handleCommand(
+/** 关键词优先,命中太少再补语义检索 */
+async function recallWithFallback(
+  env: Env,
+  groupId: string,
+  query: string,
+  excludeIds: number[],
+  cfg: MemoryConfig,
+  limit = RECALL_LIMIT,
+): Promise<MemoryHit[]> {
+  const keywords = extractKeywords(query, 6);
+  const byKeyword = keywords.length
+    ? await recallMessages(env, groupId, keywords, excludeIds, limit).catch(() => [])
+    : [];
+  if (byKeyword.length >= cfg.semanticMinHits || query.length < 4) return byKeyword;
+  const byVector = await semanticRecall(env, groupId, query, excludeIds, cfg.semanticTopK).catch(
+    () => [],
+  );
+  return mergeHits(byKeyword, byVector, limit);
+}
+
+/**
+ * 自然语言触发的群内能力(没有斜杠指令)。
+ * 命中返回 true,该消息不再走聊天流程,也不入库(避免指令污染记忆)。
+ */
+async function handleIntent(
   env: Env,
   event: GroupMessageEvent,
   rawText: string,
+  username: string,
 ): Promise<boolean> {
-  const trimmed = rawText.trim();
-  if (!trimmed.startsWith("/")) return false;
-  const [rawCmd, ...rest] = trimmed.split(/\s+/);
-  const cmd = rawCmd.toLowerCase();
-  const arg = rest.join(" ").trim();
-  const groupId = event.group_openid;
+  const intent = parseIntent(rawText);
+  if (!intent) return false;
 
+  const groupId = event.group_openid;
+  const admin = isAdmin(env, event.author?.member_openid);
+  const cfg = memoryConfig(env);
   const say = async (content: string): Promise<void> => {
     const chunks = splitForSend(content);
     for (let i = 0; i < chunks.length; i++) {
@@ -160,66 +193,110 @@ async function handleCommand(
   };
 
   try {
-    switch (cmd) {
-      case "/reset": {
+    if (intent.adminOnly && !admin) {
+      await say("这个得管理员开口我才能做。");
+      return true;
+    }
+
+    switch (intent.kind) {
+      case "reset": {
         await resetGroup(env, groupId);
-        await say("好,已清空本群的聊天记忆~");
+        await say("好,这个群的记忆我清空了。");
         return true;
       }
-      case "/recall":
-      case "/查": {
-        const keywords = extractKeywords(arg, 6);
-        if (keywords.length === 0) {
-          await say("用法:/recall 关键词(比如 /recall 日本旅游)");
+      case "reprofile": {
+        const target = intent.arg || username;
+        const profile = await generateMemberPortrait(env, groupId, target);
+        await say(
+          profile
+            ? `重新看了一遍 ${target}:${profile.persona}`
+            : `关于 ${target} 的记录太少,还画不出来。`,
+        );
+        return true;
+      }
+      case "profile": {
+        const target = intent.arg || username;
+        const [profile, stats] = await Promise.all([
+          ensureMemberProfile(env, groupId, target),
+          memberStats(env, groupId, target),
+        ]);
+        if (!profile) {
+          await say(formatMemberStats(stats));
           return true;
         }
-        const hits = await recallMessages(env, groupId, keywords, [], RECALL_LIMIT);
+        await say([`${target}:${clip(profile.persona, 200)}`, formatMemberStats(stats)].join("\n"));
+        return true;
+      }
+      case "recall": {
+        const query = intent.arg.trim();
+        if (!query) {
+          await say("想查什么?给我个关键词就行,比如「还记得日本旅游吗」。");
+          return true;
+        }
+        const hits = await recallWithFallback(env, groupId, query, [], cfg);
         await say(formatRecallReply(hits));
         return true;
       }
-      case "/summary":
-      case "/总结": {
+      case "summary": {
         const summary = await compactGroupMemory(env, groupId, true);
         await say(
-          summary ? `【群聊记忆摘要】\n${clip(summary, 400)}` : "还没攒到能总结的量,再聊会儿~",
+          summary ? `【群聊记忆摘要】\n${clip(summary, 400)}` : "记录还太少,攒够了再给你总结。",
         );
         return true;
       }
-      case "/profile":
-      case "/who": {
-        if (!arg) {
-          await say("用法:/profile 昵称");
-          return true;
-        }
-        const row = await memberStats(env, groupId, arg);
-        await say(formatMemberStats(row));
-        return true;
-      }
-      case "/help": {
-        await say(
-          [
-            "我能记住这个群的聊天:",
-            "/recall 关键词 — 翻历史",
-            "/summary — 看长期摘要",
-            "/profile 昵称 — 看某人画像",
-            "/reset — 清空本群记忆",
-          ].join("\n"),
-        );
+      case "help": {
+        await say(HELP_TEXT);
         return true;
       }
       default:
-        await say("没这个指令,/help 看看?");
-        return true;
+        return false;
     }
   } catch (err) {
-    console.error(`command ${cmd} failed:`, err);
+    console.error(`intent ${intent.kind} failed:`, err);
     return true;
+  }
+}
+
+/** 记忆相关的后台任务:画像、群风格、向量化。失败只记日志,不影响这次回复 */
+function scheduleMemoryJobs(
+  env: Env,
+  groupId: string,
+  username: string,
+  content: string,
+  stored: AppendResult,
+  ctx: ExecutionContext,
+): void {
+  const cfg = memoryConfig(env);
+  const { memberCount, msgTotal, id } = stored;
+
+  if (memberCount > 0 && memberCount % cfg.portraitEvery === 0 && memberCount <= cfg.portraitMax) {
+    ctx.waitUntil(
+      generateMemberPortrait(env, groupId, username).catch((err) =>
+        console.error("portrait failed:", err),
+      ),
+    );
+  }
+
+  if (msgTotal > 0 && msgTotal % cfg.styleEvery === 0) {
+    ctx.waitUntil(
+      generateGroupStyle(env, groupId).catch((err) => console.error("group style failed:", err)),
+    );
+  }
+
+  if (id > 0 && content.length >= 6) {
+    ctx.waitUntil(
+      (async () => {
+        const embedded = await embedText(env, content);
+        if (!embedded) return;
+        await saveEmbedding(env, groupId, id, toBase64Int8(embedded.vec), embedded.dim);
+      })().catch((err) => console.error("embed failed:", err)),
+    );
   }
 }
 
 /**
  * 统一处理群消息。
- * spontaneous=false:群 @ 机器人(必回,指令可用,LLM 失败回兜底话术)
+ * spontaneous=false:群 @ 机器人(必回,自然语言能力可用,LLM 失败回兜底话术)
  * spontaneous=true:全量消息(所有消息进记忆;提到名字必插话,否则按概率随机插话;失败静默)
  */
 async function handleGroupMessage(
@@ -230,6 +307,7 @@ async function handleGroupMessage(
 ): Promise<void> {
   if (!event.group_openid || !event.id) return;
   if (event.author?.bot) return;
+
   // 记忆层故障不能拖垮回复:去重失败时按"非重复"继续
   const duplicated = await markSeen(env, event.group_openid, event.id).catch((err) => {
     console.error("markSeen failed:", err);
@@ -238,6 +316,7 @@ async function handleGroupMessage(
   if (duplicated) return;
 
   const groupId = event.group_openid;
+  const cfg = memoryConfig(env);
   // @机器人的消息可能来自 @ 事件,也可能(全量模式下)是带 bot mention 的全量事件,
   // 两种都按“必回的 @ 消息”处理;若两份都到,去重会拦住第二份
   const isAtMessage = !spontaneous || !!event.mentions?.some((m) => m.bot);
@@ -245,24 +324,33 @@ async function handleGroupMessage(
   const username = event.author?.username?.trim() || "某人";
   const rawText = normalizeGroupText(event.content ?? "");
 
-  if (isAtMessage && (await handleCommand(env, event, rawText))) return;
+  if (isAtMessage && (await handleIntent(env, event, rawText, username))) return;
 
   const imageParts = await collectImageParts(event.attachments ?? []);
   const imageNote = imageParts.length > 0 ? `[附带${imageParts.length}张图片]` : "";
-  const quotedText = extractQuotedText(event);
-  const quoteNote = quotedText ? `[引用消息:${quotedText}]` : "";
-  const text = [rawText, imageNote, quoteNote].filter(Boolean).join(" ") ||
-    (isAtMessage ? "[发来一条非文本消息,你暂时看不懂]" : "");
-  if (!text) return;
+  const quoteNote = extractQuotedText(event);
+  const quotePart = quoteNote ? `[引用消息:${quoteNote}]` : "";
 
-  if (!isAtMessage && !shouldChimeIn(env, rawText || text)) {
-    // 不插话也要记下来,后面 @ 时才有人和事的上下文
-    await appendMessage(env, groupId, {
-      msgId: event.id,
-      role: "user",
-      author: username,
-      content: text,
-    }).catch((err) => console.error("store message failed:", err));
+  // 记忆里只存文字:图片只随当次请求发给模型,不入库、不参与画像与风格统计
+  const memoryText = [rawText, quotePart].filter(Boolean).join(" ");
+  const liveText =
+    [rawText, imageNote, quotePart].filter(Boolean).join(" ") ||
+    (isAtMessage ? "[发来一条非文本消息,你暂时看不懂]" : "");
+  if (!liveText) return;
+
+  if (!isAtMessage && !shouldChimeIn(env, rawText || liveText)) {
+    if (memoryText) {
+      const stored = await appendMessage(env, groupId, {
+        msgId: event.id,
+        role: "user",
+        author: username,
+        content: memoryText,
+      }).catch((err) => {
+        console.error("store message failed:", err);
+        return null;
+      });
+      if (stored) scheduleMemoryJobs(env, groupId, username, memoryText, stored, ctx);
+    }
     return;
   }
 
@@ -276,24 +364,28 @@ async function handleGroupMessage(
     console.error("recentMessages failed:", err);
     return [];
   });
-  const keywords = extractKeywords(rawText || text);
-  const hits = await recallMessages(
+  const groupStyle = await getGroupStyle(env, groupId).catch(() => null);
+  const speaker = await getMemberProfile(env, groupId, username).catch(() => null);
+  const hits = await recallWithFallback(
     env,
     groupId,
-    keywords,
+    rawText || liveText,
     recent.map((row) => row.id),
-    RECALL_LIMIT,
-  ).catch((err) => {
-    console.error("recallMessages failed:", err);
-    return [];
-  });
+    cfg,
+  ).catch(() => []);
 
-  await appendMessage(env, groupId, {
-    msgId: event.id,
-    role: "user",
-    author: username,
-    content: text,
-  }).catch((err) => console.error("store message failed:", err));
+  if (memoryText) {
+    const stored = await appendMessage(env, groupId, {
+      msgId: event.id,
+      role: "user",
+      author: username,
+      content: memoryText,
+    }).catch((err) => {
+      console.error("store message failed:", err);
+      return null;
+    });
+    if (stored) scheduleMemoryJobs(env, groupId, username, memoryText, stored, ctx);
+  }
 
   // 攒够量就在后台压一次长期摘要,不阻塞这次回复
   if (shouldCompact(memory.pending + 1)) {
@@ -318,7 +410,7 @@ async function handleGroupMessage(
   }
 
   // LLM 智能判断是否需要联网,需要则调 Search API 并注入结果
-  const question = rawText || text;
+  const question = rawText || liveText;
   const query = await needsSearch(env, question);
   let searchContext: string | null = null;
   if (query) {
@@ -326,14 +418,22 @@ async function handleGroupMessage(
     searchContext = await webSearch(env, query, question);
   }
 
+  const styleBlock = groupStyle
+    ? `【本群说话风格 | 只参考节奏,不要照抄口癖】\n${groupStyle.style}`
+    : null;
+  const portraitBlock = speaker
+    ? `【当前说话人画像 | 帮你判断怎么接话】\n${speaker.name}:${speaker.persona}`
+    : null;
   const summaryBlock = formatSummaryBlock(memory.summary);
   const recallBlock = formatRecallHits(hits);
   const liveUserContent: string | ContentPart[] = imageParts.length
-    ? [{ type: "text", text: `${username}: ${text}` }, ...imageParts]
-    : `${username}: ${text}`;
+    ? [{ type: "text", text: `${username}: ${liveText}` }, ...imageParts]
+    : `${username}: ${liveText}`;
 
   const messages: ChatMessage[] = [
     { role: "system", content: systemContent },
+    ...(styleBlock ? [{ role: "system" as const, content: styleBlock }] : []),
+    ...(portraitBlock ? [{ role: "system" as const, content: portraitBlock }] : []),
     ...(summaryBlock ? [{ role: "system" as const, content: summaryBlock }] : []),
     ...(recallBlock ? [{ role: "system" as const, content: recallBlock }] : []),
     ...(searchContext ? [{ role: "system" as const, content: searchContext }] : []),
@@ -421,7 +521,9 @@ async function handleWebhook(
 
   if (payload.op === 0) {
     // 尽快 ACK,后台处理,避免平台超时重推
-    ctx.waitUntil(dispatch(payload, env, ctx).catch((err) => console.error("dispatch failed:", err)));
+    ctx.waitUntil(
+      dispatch(payload, env, ctx).catch((err) => console.error("dispatch failed:", err)),
+    );
   }
   return jsonResponse({ op: 12 });
 }
@@ -436,5 +538,14 @@ export default {
       return new Response("ok", { status: 200 });
     }
     return new Response("not found", { status: 404 });
+  },
+
+  /** cron 每分钟一次:处理冷场主动发言 */
+  async scheduled(
+    _controller: ScheduledController,
+    env: Env,
+    ctx: ExecutionContext,
+  ): Promise<void> {
+    ctx.waitUntil(runIdleTick(env).catch((err) => console.error("idle tick failed:", err)));
   },
 };

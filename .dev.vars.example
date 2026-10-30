@@ -18,6 +18,36 @@ GLM_API_KEY=your_glm_api_key
 # BOT_ALIASES=小鲸,鲸鱼,机器人
 # 主动插话概率（0-1，默认 0.3；设为 0 则只在被叫到时说话）
 # CHIME_RATE=0.3
+
+# ===== 权限：管理员 member_openid（逗号分隔）=====
+# 只有白名单里的人能「清空这个群的记忆」「重新给X做个画像」
+# QQ 群消息事件不返回管理员角色，只能靠白名单
+# ADMIN_OPENIDS=xxxxx,yyyyy
+
+# ===== 记忆阈值（都可选，单位为条/分钟）=====
+# 成员每 N 条发言画一次像；累计满 N 条后不再自动画像
+# PORTRAIT_EVERY=20
+# PORTRAIT_MAX=100
+# PORTRAIT_MIN_SAMPLES=5
+# 群消息每 N 条更新一次群风格
+# STYLE_EVERY=150
+# STYLE_MIN_SAMPLES=10
+
+# ===== 冷场主动发言（需要 QQ 主动消息额度）=====
+# 静默多少分钟后可发；随机等待上限（分钟）；群消息低于该值不发言
+# IDLE_AFTER_MIN=30
+# IDLE_MAX_WAIT_MIN=300
+# IDLE_MIN_MSGS=10
+# IDLE_BATCH=3
+
+# ===== 语义检索（不配 key 则只用关键词检索）=====
+# key 不填则回落到 GLM_API_KEY
+# EMBEDDING_API_KEY=your_glm_api_key
+# EMBEDDING_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+# EMBEDDING_MODEL=embedding-3
+# 关键词命中少于此值时补向量检索
+# SEMANTIC_MIN_HITS=2
+# SEMANTIC_TOP_K=3
 # 以下仅本地联调/测试需要，生产保持注释
 # GLM_BASE_URL=https://open.bigmodel.cn
 # DEEPSEEK_BASE_URL=https://api.deepseek.com

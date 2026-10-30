@@ -16,7 +16,11 @@ No server required — one Worker is enough. The LLM layer supports **multi-prov
 - **Multi-part replies** — the model may split a reply into 2–3 messages with a `---` separator
 - **Proactive chime-in** — optional probabilistic replies; always replies when its alias is mentioned
 - **Persistent memory (D1)** — every group message is stored in Cloudflare D1, per-group isolated
-- **Recall & summarize** — `/recall keyword` searches the archive, `/summary` compacts it into a 400-word long-term memory, `/profile name` shows member stats
+- **No slash commands** — just talk to it: "还记得日本旅游吗", "总结一下群里最近聊的", "张三是什么样的人"
+- **Member personas** — one auto-generated every 20 messages, stops at 100; admins can force a redo
+- **Group style profile** — learns sentence rhythm, forms of address, and verbal tics
+- **Idle chime-in** — after 30 minutes of silence it picks a random moment within 5 hours to speak up
+- **Semantic fallback** — embeddings kick in when keyword recall is thin (int8 vectors stored in D1)
 - **Signature verification** — Ed25519 webhook signing and automatic `op=13` callback validation
 
 ## Quick start
@@ -49,6 +53,11 @@ npm run db:migrate:local # local tables (the Worker also creates them lazily)
 | `BOT_PROMPT` | | Overrides `src/prompt/persona.txt` |
 | `BOT_ALIASES` | | Comma-separated aliases that always trigger a reply |
 | `CHIME_RATE` | | Chime-in probability, `0`–`1`, default `0.3` |
+| `ADMIN_OPENIDS` | | Comma-separated `member_openid`s allowed to wipe memory / redo personas |
+| `PORTRAIT_EVERY` / `PORTRAIT_MAX` | | Persona cadence and cutoff, default `20` / `100` |
+| `STYLE_EVERY` | | Group style refresh cadence, default `150` |
+| `IDLE_AFTER_MIN` / `IDLE_MAX_WAIT_MIN` | | Silence threshold and random cap (minutes), default `30` / `300` |
+| `EMBEDDING_MODEL` / `EMBEDDING_API_KEY` | | Vector model for semantic recall, default `embedding-3` |
 
 ## Deploy
 
@@ -68,12 +77,12 @@ Then in the QQ Open Platform console, choose **Webhook** delivery, set the callb
 
 | Table | Purpose |
 | --- | --- |
-| `messages` | Raw turns, capped at 500 per group |
+| `messages` | Raw turns, capped at 500 per group (text only — images are never stored) |
 | `summaries` | Rolling 400-word group memory, refreshed every 40 new messages |
 | `members` | Per-member counters (turns, chars, first/last seen, last line) |
 | `seen` | Event de-duplication, 10-minute TTL |
 
-Retrieval is keyword-based (`LIKE` pushed down to SQL, scored in memory), 5 hits max per turn. Compaction runs in `ctx.waitUntil` so it never blocks a reply.
+Retrieval is keyword-first (`LIKE` pushed down to SQL, scored in memory) with an embedding fallback when fewer than 2 hits come back. Compaction, personas, style, and embeddings all run in `ctx.waitUntil` so they never block a reply. A cron tick every minute handles idle chime-ins via active messages.
 
 See [docs/ROADMAP.md](./docs/ROADMAP.md) for further directions (member personas, group style profiles, slang dictionary, weekly reports, semantic retrieval).
 
