@@ -1,99 +1,98 @@
 # qq-group-bot
 
-A QQ group chatbot running on **Cloudflare Workers**. Mention it in a group and it replies; with full-message mode enabled it also chimes in on its own now and then.
+A QQ group bot on Cloudflare Workers. Mention it and it replies; with full-message mode on, it also chimes in on its own. Chat history lives in D1, so asking "what did we say about that trip last week" days later still works.
 
-No server required — one Worker is enough. The LLM layer supports **multi-provider failover**, image understanding, smart web search, quoted-message context, and multi-part replies that feel like someone typing.
+One Worker, no server. DeepSeek is the primary model, with free GLM models as fallback. Images, quoted messages, and web search are supported.
 
-> 中文说明见 [README.md](./README.md)
+Chinese docs: [README.md](./README.md).
 
-## Features
-
-- **Zero server** — runs within the Cloudflare Workers free tier
-- **Provider failover** — DeepSeek first, then a chain of free GLM models; any failure falls through to the next
-- **Image understanding** — group images are downloaded, base64-encoded, and sent to a vision model (up to 3 per message)
-- **Smart web search** — a cheap LLM call decides whether the message needs live info; search only runs when needed
-- **Quoted messages** — quoted content (`message_type=103`) is injected as context
-- **Multi-part replies** — the model may split a reply into 2–3 messages with a `---` separator
-- **Proactive chime-in** — optional probabilistic replies; always replies when its alias is mentioned
-- **Persistent memory (D1)** — every group message is stored in Cloudflare D1, per-group isolated
-- **No slash commands** — just talk to it: "还记得日本旅游吗", "总结一下群里最近聊的", "张三是什么样的人"
-- **Member personas** — one auto-generated every 20 messages, stops at 100; admins can force a redo
-- **Group style profile** — learns sentence rhythm, forms of address, and verbal tics
-- **Idle chime-in** — after 30 minutes of silence it picks a random moment within 5 hours to speak up
-- **Semantic fallback** — embeddings kick in when keyword recall is thin (int8 vectors stored in D1)
-- **Signature verification** — Ed25519 webhook signing and automatic `op=13` callback validation
-
-## Quick start
+## Run locally
 
 ```bash
-git clone https://github.com/<you>/qq-group-bot.git
+git clone https://github.com/evansrrr/qq-group-bot.git
 cd qq-group-bot
 npm install
-cp .dev.vars.example .dev.vars   # fill in your keys
-npm run dev                      # http://127.0.0.1:8787
+cp .dev.vars.example .dev.vars   # app id, bot secret, at least one model key
+npm run db:create                # copy the printed database_id into wrangler.jsonc
+npm run db:migrate:local         # optional; tables are created lazily
+npm run dev
 ```
 
-## Setup the database
+`curl http://127.0.0.1:8787/health` returns `ok`. The placeholder `database_id` in `wrangler.jsonc` is fine locally, but must be replaced before deploying.
 
-```bash
-npm run db:create        # copy the printed database_id into wrangler.jsonc
-npm run db:migrate:local # local tables (the Worker also creates them lazily)
-```
+## Config
 
-## Configuration
+`QQ_APP_ID` and `QQ_BOT_SECRET` are required. Set at least one of `DEEPSEEK_API_KEY` / `GLM_API_KEY`; with both, requests fall through DeepSeek to the free GLM models. In production use `npx wrangler secret put <NAME>`.
 
-| Variable | Required | Description |
-| --- | --- | --- |
-| `QQ_APP_ID` | ✅ | QQ Open Platform app id |
-| `QQ_BOT_SECRET` | ✅ | Bot secret, also used to derive the Ed25519 key |
-| `DEEPSEEK_API_KEY` | either | Preferred provider; also enables web search |
-| `GLM_API_KEY` | either | Zhipu fallback provider |
-| `DEEPSEEK_MODEL` | | Defaults to `deepseek-flash` |
-| `GLM_MODELS` | | Comma-separated model chain |
-| `BOT_PROMPT` | | Overrides `src/prompt/persona.txt` |
-| `BOT_ALIASES` | | Comma-separated aliases that always trigger a reply |
-| `CHIME_RATE` | | Chime-in probability, `0`–`1`, default `0.3` |
-| `ADMIN_OPENIDS` | | Comma-separated `member_openid`s allowed to wipe memory / redo personas |
-| `PORTRAIT_EVERY` / `PORTRAIT_MAX` | | Persona cadence and cutoff, default `20` / `100` |
-| `STYLE_EVERY` | | Group style refresh cadence, default `150` |
-| `IDLE_AFTER_MIN` / `IDLE_MAX_WAIT_MIN` | | Silence threshold and random cap (minutes), default `30` / `300` |
-| `EMBEDDING_MODEL` / `EMBEDDING_API_KEY` | | Vector model for semantic recall, default `embedding-3` |
+| Variable | Purpose |
+| --- | --- |
+| `BOT_PROMPT` | Overrides the default persona |
+| `BOT_ALIASES` | Names that always trigger a reply, default `小鲸,鲸鱼,机器人` |
+| `CHIME_RATE` | Chime-in probability, default `0.3`; `0` means reply only when mentioned |
+| `ADMIN_OPENIDS` | `member_openid`s allowed to wipe memory or redo a portrait |
+| `PORTRAIT_EVERY` / `STYLE_EVERY` | Portrait / group-style cadence, default 20 / 150 messages |
+| `IDLE_AFTER_MIN` / `IDLE_MAX_WAIT_MIN` | Silence threshold and random cap, default 30 / 300 minutes |
+| `EMBEDDING_API_KEY` | Enables semantic recall; without it, keywords only |
+
+All variables and defaults are listed in `.dev.vars.example`. D1 is a binding in `wrangler.jsonc`, not an env var.
+
+## Talking to it
+
+No slash commands. Just mention it in plain words:
+
+- "还记得日本旅游吗" / "查一下之前的记录 显卡" — pull up old messages
+- "总结一下群里最近聊的" — long-term summary
+- "张三是什么样的人" — member portrait and stats
+- "清空这个群的记忆" / "重新给张三做个画像" — admins only
+- "你能做什么" — help
+
+Intents are matched with regex (`src/intent.ts`), not an LLM: cheaper and predictable. To find your `member_openid` for the admin list, say "清空这个群的记忆" in the group and read it from `npx wrangler tail`.
+
+## Memory
+
+D1 is isolated per group. Each group keeps the latest 500 messages; every 40 unsummarized messages trigger a 400-character rolling summary in the background, plus member counters and a dedupe table. A reply gets the last 20 messages, the summary, and recalled lines. Recall is SQL `LIKE` first, with embeddings only when fewer than 2 lines hit. Summaries, portraits, group style, and embeddings all run in `waitUntil` so they never block a reply.
+
+Portraits refresh every 20 messages per member (stops at 100), group style every 150 messages. After 30 minutes of silence a cron job picks a random moment in the next 5 hours to say something; it does not reschedule until someone speaks again. The cron runs every minute — remove `triggers` from `wrangler.jsonc` to disable it.
+
+Images are base64-encoded for the current vision request only; they are never stored.
 
 ## Deploy
 
 ```bash
 npx wrangler login
+npm run db:migrate
 npx wrangler secret put QQ_APP_ID
 npx wrangler secret put QQ_BOT_SECRET
 npx wrangler secret put DEEPSEEK_API_KEY
 npm run deploy
 ```
 
-Then in the QQ Open Platform console, choose **Webhook** delivery, set the callback to
-`https://<your-host>/qq/webhook`, and subscribe to `GROUP_AT_MESSAGE_CREATE`
-(plus `GROUP_MESSAGE_CREATE` if you want proactive chime-in).
+On the first deploy, run `npm run db:create` first and put the real `database_id` into `wrangler.jsonc`. The default host is `https://<worker-name>.<subdomain>.workers.dev`; the callback is `https://<your-host>/qq/webhook`, and QQ only allows ports 80/443/8080/8443. Uncomment `routes` in `wrangler.jsonc` to use a custom domain.
 
-## How memory works
+Create the bot at [q.qq.com](https://q.qq.com/), choose Webhook delivery, and subscribe to `GROUP_AT_MESSAGE_CREATE`. For chime-ins, also enable full-message delivery and `GROUP_MESSAGE_CREATE`. The `op=13` callback check is answered automatically with a key derived from the bot secret.
 
-| Table | Purpose |
-| --- | --- |
-| `messages` | Raw turns, capped at 500 per group (text only — images are never stored) |
-| `summaries` | Rolling 400-word group memory, refreshed every 40 new messages |
-| `members` | Per-member counters (turns, chars, first/last seen, last line) |
-| `seen` | Event de-duplication, 10-minute TTL |
+## Persona
 
-Retrieval is keyword-first (`LIKE` pushed down to SQL, scored in memory) with an embedding fallback when fewer than 2 hits come back. Compaction, personas, style, and embeddings all run in `ctx.waitUntil` so they never block a reply. A cron tick every minute handles idle chime-ins via active messages.
+Edit `src/prompt/persona.txt` or override it with `BOT_PROMPT`. Tell the model to keep replies to two short sentences with no lists or customer-service tone. A line containing only `---` splits one reply into several messages.
 
-See [docs/ROADMAP.md](./docs/ROADMAP.md) for further directions (member personas, group style profiles, slang dictionary, weekly reports, semantic retrieval).
-
-## Test
+## Tests
 
 ```bash
 npm run typecheck
 npm test
-npm run smoke   # end-to-end with mocked upstream services, no real keys needed
+npm run smoke
 ```
 
-## License
+`smoke` starts a local Worker with mocked upstreams, so it costs nothing; ports 8787 and 9099 must be free, and `.dev.vars` is restored afterwards.
 
-[MIT](./LICENSE)
+## Caveats
+
+- Idle messages need QQ's proactive-message quota; when it runs out, sending fails and the plan is dropped.
+- Passive replies are capped at 5 per message within 5 minutes, so long text is cut into at most 4 chunks of 500 characters.
+- Images are downloaded into Worker memory — watch the memory and CPU limits.
+- Group messages only. DMs, voice, and video are not supported.
+- Early portraits are based on few samples and can turn a joke into a personality trait; admins can redo them.
+
+Start at `src/index.ts` (signature check, dispatch, sending); memory lives in `src/memory/`, and provider failover in `src/llm.ts`.
+
+MIT, see [LICENSE](./LICENSE). Contribution notes in [CONTRIBUTING.md](./CONTRIBUTING.md). Tell group members that messages are read, follow the QQ Open Platform rules, and don't use it for spam.
