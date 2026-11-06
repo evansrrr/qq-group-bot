@@ -194,6 +194,10 @@ async function handleIntent(
 
   try {
     if (intent.adminOnly && !admin) {
+      // 白名单为空时靠这条日志取 openid:群里说一句「清空这个群的记忆」,再看 wrangler tail
+      console.warn(
+        `admin intent denied: kind=${intent.kind} member_openid=${event.author?.member_openid ?? "unknown"}`,
+      );
       await say("这个得管理员开口我才能做。");
       return true;
     }

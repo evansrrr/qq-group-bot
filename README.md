@@ -1,6 +1,6 @@
 # qq-group-bot
 
-一个跑在 **Cloudflare Workers** 上的 QQ 官方群聊机器人：群里 @ 它就能聊天，不 @ 它也会偶尔自己接话。
+一个跑在 **Cloudflare Workers** 上的 QQ 官方群聊机器人
 
 后端极轻（单个 Worker，无需服务器），LLM 支持**多供应商故障转移**，并且带图片理解、联网搜索、引用消息理解、多段消息回复。
 
